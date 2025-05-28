@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -12,9 +13,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -48,8 +52,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusUnauthorized, "User not authorized to edit video", errors.New("User not authorized to edit video"))
 		return
 	}
-
-	fmt.Println("uploading video", videoID, "by user", userID)
 
 	file, header, err := r.FormFile("video")
 	if err != nil {
@@ -146,7 +148,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, randFileName)
+	videoURL := fmt.Sprintf("%s,%s", cfg.s3Bucket, randFileName)
 	video.VideoURL = &videoURL
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
@@ -154,7 +156,12 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, video)
+	psVideo, err := cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error getting video URL", err)
+		return
+	}
+	respondWithJSON(w, http.StatusOK, psVideo)
 }
 
 type FFProbe struct {
@@ -191,4 +198,23 @@ func processVideoForFastStart(filePath string) (string, error) {
 		return "", err
 	}
 	return outputFile, nil
+}
+
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	psClient := s3.NewPresignClient(s3Client)
+	psRequest, err := psClient.PresignGetObject(context.Background(), &s3.GetObjectInput{Bucket: &bucket, Key: &key}, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return "", err
+	}
+	return psRequest.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	splitURL := strings.Split(*video.VideoURL, ",")
+	psURL, err := generatePresignedURL(cfg.s3Client, splitURL[0], splitURL[1], time.Minute)
+	if err != nil {
+		return database.Video{}, err
+	}
+	video.VideoURL = &psURL
+	return video, nil
 }
