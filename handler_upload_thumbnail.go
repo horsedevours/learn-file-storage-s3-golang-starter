@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -42,15 +47,47 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	mt := header.Header.Get("Content-Type")
-	if mt == "" {
+	mediaType, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error parsing header", err)
+		return
+	}
+	if mediaType == "" {
 		respondWithError(w, http.StatusBadRequest, "Missing Content-Type header", errors.New("Missing Content-Type header"))
 		return
 	}
 
-	imgData, err := io.ReadAll(file)
+	fileExtension := ""
+	switch mediaType {
+	case "image/png":
+		fileExtension = ".png"
+	case "image/jpeg":
+		fileExtension = ".jpeg"
+	default:
+		respondWithError(w, http.StatusBadRequest, "Unsupported image type", errors.New("Unsupported image type"))
+		return
+	}
+
+	randData := make([]byte, 32)
+	_, err = rand.Read(randData)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error reading file", err)
+		respondWithError(w, http.StatusInternalServerError, "Error generating file name", err)
+		return
+	}
+	randFileName := base64.RawURLEncoding.EncodeToString(randData)
+
+	fileName := fmt.Sprintf("%s%s", randFileName, fileExtension)
+	imgPath := filepath.Join(cfg.assetsRoot, fileName)
+	imgFile, err := os.Create(imgPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error creating new file", err)
+		return
+	}
+	defer imgFile.Close()
+
+	_, err = io.Copy(imgFile, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to write image file", err)
 		return
 	}
 
@@ -65,14 +102,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	tn := thumbnail{
-		data:      imgData,
-		mediaType: mt,
-	}
-	videoThumbnails[videoID] = tn
-
-	tnURL := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoIDString)
-	video.ThumbnailURL = &tnURL
+	thumbURL := fmt.Sprintf("http://localhost:%s/assets/%s", cfg.port, fileName)
+	video.ThumbnailURL = &thumbURL
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error saving to database", err)
